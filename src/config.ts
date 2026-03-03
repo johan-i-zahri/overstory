@@ -2,6 +2,24 @@ import { dirname, join, resolve } from "node:path";
 import { ConfigError, ValidationError } from "./errors.ts";
 import type { OverstoryConfig, QualityGate, TaskTrackerBackend } from "./types.ts";
 
+// Module-level project root override (set by --project global flag)
+let _projectRootOverride: string | undefined;
+
+/** Override project root for all config resolution (used by --project global flag). */
+export function setProjectRootOverride(path: string): void {
+	_projectRootOverride = path;
+}
+
+/** Get the current project root override, if any. */
+export function getProjectRootOverride(): string | undefined {
+	return _projectRootOverride;
+}
+
+/** Clear the project root override (used in tests and cleanup). */
+export function clearProjectRootOverride(): void {
+	_projectRootOverride = undefined;
+}
+
 /**
  * Default configuration with all fields populated.
  * Used as the base; file-loaded values are merged on top.
@@ -777,6 +795,11 @@ async function mergeLocalConfig(
  * @returns The resolved project root containing `.overstory/`
  */
 export async function resolveProjectRoot(startDir: string): Promise<string> {
+	// Check for explicit override first (set by --project global flag)
+	if (_projectRootOverride !== undefined) {
+		return _projectRootOverride;
+	}
+
 	const { existsSync } = require("node:fs") as typeof import("node:fs");
 
 	// Check git worktree FIRST. When running from an agent worktree

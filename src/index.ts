@@ -7,6 +7,8 @@
  * Usage: ov <command> [args...]
  */
 
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { Command, Help } from "commander";
 import { createAgentsCommand } from "./commands/agents.ts";
 import { cleanCommand } from "./commands/clean.ts";
@@ -42,7 +44,8 @@ import { createUpdateCommand } from "./commands/update.ts";
 import { createUpgradeCommand } from "./commands/upgrade.ts";
 import { createWatchCommand } from "./commands/watch.ts";
 import { createWorktreeCommand } from "./commands/worktree.ts";
-import { OverstoryError, WorktreeError } from "./errors.ts";
+import { setProjectRootOverride } from "./config.ts";
+import { ConfigError, OverstoryError, WorktreeError } from "./errors.ts";
 import { jsonError } from "./json.ts";
 import { brand, chalk, muted, setQuiet } from "./logging/color.ts";
 
@@ -146,6 +149,7 @@ program
 	.option("--json", "JSON output")
 	.option("--verbose", "Verbose output")
 	.option("--timing", "Print command execution time to stderr")
+	.option("--project <path>", "Target project root (overrides auto-detection)")
 	.addHelpCommand(false)
 	.configureHelp({
 		formatHelp(cmd, helper): string {
@@ -200,6 +204,17 @@ program.hook("preAction", (thisCmd) => {
 	const opts = thisCmd.optsWithGlobals();
 	if (opts.quiet) {
 		setQuiet(true);
+	}
+	const projectFlag = opts.project as string | undefined;
+	if (projectFlag !== undefined) {
+		const resolvedProject = resolve(process.cwd(), projectFlag);
+		if (!existsSync(join(resolvedProject, ".overstory", "config.yaml"))) {
+			throw new ConfigError(
+				`'${resolvedProject}' is not an overstory project (missing .overstory/config.yaml). Run 'ov init' first.`,
+				{ configPath: join(resolvedProject, ".overstory", "config.yaml") },
+			);
+		}
+		setProjectRootOverride(resolvedProject);
 	}
 	if (opts.timing) {
 		timingStart = performance.now();
