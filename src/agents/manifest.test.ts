@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { AgentError } from "../errors.ts";
 import { cleanupTempDir } from "../test-helpers.ts";
 import type { AgentManifest, OverstoryConfig } from "../types.ts";
-import { createManifestLoader, resolveModel, resolveProviderEnv } from "./manifest.ts";
+import {
+	createManifestLoader,
+	expandAliasFromEnv,
+	resolveModel,
+	resolveProviderEnv,
+} from "./manifest.ts";
 
 const VALID_MANIFEST = {
 	version: "1.0",
@@ -670,6 +675,168 @@ describe("resolveModel", () => {
 		// Provider is "mygateway", model ID is everything after the first "/"
 		expect(result.model).toBe("sonnet");
 		expect(result.env?.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("org/model/version");
+	});
+});
+
+describe("expandAliasFromEnv", () => {
+	test("returns expanded model ID when env var is set", () => {
+		expect(
+			expandAliasFromEnv("haiku", {
+				ANTHROPIC_DEFAULT_HAIKU_MODEL: "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+			}),
+		).toBe("us.anthropic.claude-3-5-haiku-20241022-v1:0");
+	});
+
+	test("returns alias unchanged when env var is unset", () => {
+		expect(expandAliasFromEnv("haiku", {})).toBe("haiku");
+	});
+
+	test("expands all three aliases via their env vars", () => {
+		const env = {
+			ANTHROPIC_DEFAULT_HAIKU_MODEL: "bedrock-haiku-id",
+			ANTHROPIC_DEFAULT_SONNET_MODEL: "bedrock-sonnet-id",
+			ANTHROPIC_DEFAULT_OPUS_MODEL: "bedrock-opus-id",
+		};
+		expect(expandAliasFromEnv("haiku", env)).toBe("bedrock-haiku-id");
+		expect(expandAliasFromEnv("sonnet", env)).toBe("bedrock-sonnet-id");
+		expect(expandAliasFromEnv("opus", env)).toBe("bedrock-opus-id");
+	});
+
+	test("trims whitespace from env var value", () => {
+		expect(
+			expandAliasFromEnv("sonnet", {
+				ANTHROPIC_DEFAULT_SONNET_MODEL: "  bedrock-sonnet-id  ",
+			}),
+		).toBe("bedrock-sonnet-id");
+	});
+
+	test("returns alias when env var is empty string", () => {
+		expect(expandAliasFromEnv("sonnet", { ANTHROPIC_DEFAULT_SONNET_MODEL: "" })).toBe("sonnet");
+	});
+
+	test("returns alias when env var is whitespace only", () => {
+		expect(expandAliasFromEnv("sonnet", { ANTHROPIC_DEFAULT_SONNET_MODEL: "   " })).toBe("sonnet");
+	});
+
+	test("returns unknown alias unchanged", () => {
+		expect(expandAliasFromEnv("gpt-4", {})).toBe("gpt-4");
+	});
+});
+
+describe("resolveModel env var expansion", () => {
+	const baseManifest: AgentManifest = {
+		version: "1.0",
+		agents: {
+			scout: {
+				file: "scout.md",
+				model: "haiku",
+				tools: ["Read"],
+				capabilities: ["explore"],
+				canSpawn: false,
+				constraints: [],
+			},
+			builder: {
+				file: "builder.md",
+				model: "sonnet",
+				tools: ["Read", "Write"],
+				capabilities: ["implement"],
+				canSpawn: false,
+				constraints: [],
+			},
+		},
+		capabilityIndex: { explore: ["scout"], implement: ["builder"] },
+	};
+
+	function makeConfig(models: OverstoryConfig["models"] = {}): OverstoryConfig {
+		return {
+			project: { name: "test", root: "/tmp/test", canonicalBranch: "main" },
+			agents: {
+				manifestPath: ".overstory/agent-manifest.json",
+				baseDir: ".overstory/agent-defs",
+				maxConcurrent: 5,
+				staggerDelayMs: 1000,
+				maxDepth: 2,
+				maxSessionsPerRun: 0,
+				maxAgentsPerLead: 5,
+			},
+			worktrees: { baseDir: ".overstory/worktrees" },
+			taskTracker: { backend: "auto", enabled: false },
+			mulch: { enabled: false, domains: [], primeFormat: "markdown" },
+			merge: { aiResolveEnabled: false, reimagineEnabled: false },
+			providers: { anthropic: { type: "native" } },
+			watchdog: {
+				tier0Enabled: false,
+				tier0IntervalMs: 30000,
+				tier1Enabled: false,
+				tier2Enabled: false,
+				staleThresholdMs: 300000,
+				zombieThresholdMs: 600000,
+				nudgeIntervalMs: 60000,
+			},
+			models,
+			logging: { verbose: false, redactSecrets: true },
+		};
+	}
+
+	test("expands alias when env var is set", () => {
+		const saved = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+		process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "us.anthropic.claude-3-5-haiku-20241022-v1:0";
+		try {
+			const result = resolveModel(makeConfig(), baseManifest, "scout", "sonnet");
+			expect(result).toEqual({ model: "us.anthropic.claude-3-5-haiku-20241022-v1:0" });
+		} finally {
+			if (saved === undefined) {
+				delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+			} else {
+				process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = saved;
+			}
+		}
+	});
+
+	test("passes alias through when env var is unset", () => {
+		const saved = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+		delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+		try {
+			const result = resolveModel(makeConfig(), baseManifest, "scout", "sonnet");
+			expect(result).toEqual({ model: "haiku" });
+		} finally {
+			if (saved !== undefined) {
+				process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = saved;
+			}
+		}
+	});
+
+	test("config override to full model ID is not affected by env vars", () => {
+		const saved = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+		process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = "bedrock-sonnet";
+		try {
+			// Config overrides to a direct model string (not an alias)
+			const config = makeConfig({ builder: "claude-3-5-sonnet-20241022" });
+			const result = resolveModel(config, baseManifest, "builder", "haiku");
+			expect(result).toEqual({ model: "claude-3-5-sonnet-20241022" });
+		} finally {
+			if (saved === undefined) {
+				delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+			} else {
+				process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = saved;
+			}
+		}
+	});
+
+	test("config override to alias also expands via env var", () => {
+		const saved = process.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+		process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = "bedrock-opus-id";
+		try {
+			const config = makeConfig({ scout: "opus" });
+			const result = resolveModel(config, baseManifest, "scout", "haiku");
+			expect(result).toEqual({ model: "bedrock-opus-id" });
+		} finally {
+			if (saved === undefined) {
+				delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+			} else {
+				process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = saved;
+			}
+		}
 	});
 });
 

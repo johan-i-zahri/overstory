@@ -34,6 +34,27 @@ interface RawManifest {
 
 const MODEL_ALIASES = new Set(["sonnet", "opus", "haiku"]);
 
+// Env var mapping: alias → ANTHROPIC_DEFAULT_{ALIAS}_MODEL
+const ALIAS_ENV_VARS: Record<string, string> = {
+	haiku: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	sonnet: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+	opus: "ANTHROPIC_DEFAULT_OPUS_MODEL",
+};
+
+/**
+ * Expand a model alias via its corresponding ANTHROPIC_DEFAULT_{ALIAS}_MODEL env var.
+ * Returns the env var value if set, otherwise the original alias.
+ */
+export function expandAliasFromEnv(
+	alias: string,
+	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
+): string {
+	const envVar = ALIAS_ENV_VARS[alias];
+	if (!envVar) return alias;
+	const value = env[envVar];
+	return value?.trim() || alias;
+}
+
 /**
  * Validate that a raw parsed object conforms to the AgentDefinition shape.
  * Returns a list of error messages for any violations.
@@ -333,9 +354,9 @@ export function resolveModel(
 	const configModel = config.models[role];
 	const rawModel = configModel ?? manifest.agents[role]?.model ?? fallback;
 
-	// Simple alias — no provider env needed
+	// Simple alias — expand via env var if set (e.g. ANTHROPIC_DEFAULT_SONNET_MODEL)
 	if (MODEL_ALIASES.has(rawModel)) {
-		return { model: rawModel };
+		return { model: expandAliasFromEnv(rawModel) };
 	}
 
 	// Provider-prefixed: split on first "/" to get provider name and model ID
