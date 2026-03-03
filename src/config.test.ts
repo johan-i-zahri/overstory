@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_CONFIG, DEFAULT_QUALITY_GATES, loadConfig, resolveProjectRoot } from "./config.ts";
+import {
+	DEFAULT_CONFIG,
+	DEFAULT_QUALITY_GATES,
+	clearProjectRootOverride,
+	loadConfig,
+	resolveProjectRoot,
+	setProjectRootOverride,
+} from "./config.ts";
 import { ValidationError } from "./errors.ts";
 import { cleanupTempDir, createTempGitRepo, runGitInDir } from "./test-helpers.ts";
 
@@ -958,6 +965,63 @@ describe("resolveProjectRoot", () => {
 		const config = await loadConfig(worktreeDir);
 		expect(config.project.root).toBe(repoDir);
 		expect(config.project.canonicalBranch).toBe("develop");
+	});
+});
+
+describe("projectRootOverride", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await mkdtemp(join(tmpdir(), "overstory-test-"));
+		clearProjectRootOverride();
+	});
+
+	afterEach(async () => {
+		clearProjectRootOverride();
+		await cleanupTempDir(tempDir);
+	});
+
+	test("setProjectRootOverride makes resolveProjectRoot return the override", async () => {
+		setProjectRootOverride(tempDir);
+		const result = await resolveProjectRoot("/some/other/dir");
+		expect(result).toBe(tempDir);
+	});
+
+	test("clearProjectRootOverride restores normal resolution", async () => {
+		setProjectRootOverride("/completely/fake/path");
+		clearProjectRootOverride();
+		// After clearing, normal resolution returns startDir when no .overstory present
+		const result = await resolveProjectRoot(tempDir);
+		expect(result).toBe(tempDir);
+	});
+
+	test("loadConfig respects project root override", async () => {
+		await mkdir(join(tempDir, ".overstory"), { recursive: true });
+		await Bun.write(
+			join(tempDir, ".overstory", "config.yaml"),
+			"project:\n  canonicalBranch: override-branch\n",
+		);
+		setProjectRootOverride(tempDir);
+		const config = await loadConfig("/completely/different/path");
+		expect(config.project.root).toBe(tempDir);
+		expect(config.project.canonicalBranch).toBe("override-branch");
+	});
+
+	test("override takes precedence over worktree resolution", async () => {
+		// Even if we're in a worktree, the override wins
+		const otherDir = await mkdtemp(join(tmpdir(), "overstory-other-"));
+		try {
+			await mkdir(join(otherDir, ".overstory"), { recursive: true });
+			await Bun.write(
+				join(otherDir, ".overstory", "config.yaml"),
+				"project:\n  canonicalBranch: other-branch\n",
+			);
+			setProjectRootOverride(otherDir);
+			const result = await resolveProjectRoot(tempDir);
+			expect(result).toBe(otherDir);
+		} finally {
+			await cleanupTempDir(otherDir);
+		}
 	});
 });
 
